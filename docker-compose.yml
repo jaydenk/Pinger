@@ -13,6 +13,23 @@ services:
       - FAILURE_CHECK_INTERVAL=${FAILURE_CHECK_INTERVAL:-5}
       - ALERT_OFFLINE_INTERVAL=${ALERT_OFFLINE_INTERVAL:-1800}
       - ALERT_ONLINE_INTERVAL=${ALERT_ONLINE_INTERVAL:-0}
+      - HEARTBEAT_PORT=${HEARTBEAT_PORT:-8080}
+      - HEARTBEAT_API_KEY=${HEARTBEAT_API_KEY}
+      - HEARTBEAT_STALE_SECONDS=${HEARTBEAT_STALE_SECONDS:-120}
     volumes:
       - ${CSV_PATH:-/opt/pinger/targets.csv}:/app/targets.csv:ro
       - /etc/localtime:/etc/localtime:ro
+    networks:
+      - proxy
+      - default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pinger.rule=Host(`pinger.${HOSTNAME}`)"
+      - "traefik.http.routers.pinger.entrypoints=web-secure"
+      - "traefik.http.routers.pinger.tls.certresolver=myresolver"
+      - "traefik.http.services.pinger.loadbalancer.server.port=8080"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    external: true

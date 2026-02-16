@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -13,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,6 +35,58 @@ ALERT_OFFLINE_INTERVAL = int(os.environ.get("ALERT_OFFLINE_INTERVAL", "1800"))
 ALERT_ONLINE_INTERVAL = int(os.environ.get("ALERT_ONLINE_INTERVAL", "0"))
 PUSHOVER_USER_KEY = os.environ.get("PUSHOVER_USER_KEY", "")
 PUSHOVER_API_TOKEN = os.environ.get("PUSHOVER_API_TOKEN", "")
+HEARTBEAT_PORT = int(os.environ.get("HEARTBEAT_PORT", "8080"))
+HEARTBEAT_API_KEY = os.environ.get("HEARTBEAT_API_KEY", "")
+HEARTBEAT_STALE_SECONDS = int(os.environ.get("HEARTBEAT_STALE_SECONDS", "120"))
+
+
+# ── Heartbeat state ────────────────────────────────────────────────────────
+
+heartbeat_timestamps = {}
+heartbeat_lock = threading.Lock()
+
+
+# ── Heartbeat HTTP server ──────────────────────────────────────────────────
+
+class HeartbeatHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if HEARTBEAT_API_KEY:
+            auth = self.headers.get("Authorization", "")
+            if auth != f"Bearer {HEARTBEAT_API_KEY}":
+                self.send_response(401)
+                self.end_headers()
+                return
+
+        parts = self.path.strip("/").split("/")
+        if len(parts) == 2 and parts[0] == "heartbeat":
+            hb_id = parts[1]
+            with heartbeat_lock:
+                heartbeat_timestamps[hb_id] = time.time()
+            logger.debug(f"Heartbeat received: {hb_id}")
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+def start_heartbeat_server():
+    server = HTTPServer(("0.0.0.0", HEARTBEAT_PORT), HeartbeatHandler)
+    logger.info(f"Heartbeat server listening on port {HEARTBEAT_PORT}")
+    server.serve_forever()
 
 
 # ── Pushover notification ──────────────────────────────────────────────────
@@ -85,6 +139,41 @@ def ping_icmp(address, timeout=5):
         return False
 
 
+def ping_tcp(address, timeout=5):
+    """TCP connection check. Returns True if a TCP connection can be established.
+
+    Address format: host:port (e.g. 8.8.8.8:53, 1.1.1.1:443).
+    Defaults to port 443 if no port specified.
+    """
+    if ":" in address:
+        host, port_str = address.rsplit(":", 1)
+        try:
+            port = int(port_str)
+        except ValueError:
+            host, port = address, 443
+    else:
+        host, port = address, 443
+
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.close()
+        return True
+    except (socket.timeout, OSError):
+        return False
+
+
+def ping_dns(address, timeout=5):
+    """DNS resolution check. Returns True if the hostname resolves successfully."""
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.getaddrinfo(address, None)
+        return True
+    except socket.gaierror:
+        return False
+    except Exception:
+        return False
+
+
 def ping_http(address, timeout=5):
     """HTTP(S) health check. Returns True if the server responds with a non-server-error status."""
     url = (
@@ -102,18 +191,51 @@ def ping_http(address, timeout=5):
         return False
 
 
+def ping_heartbeat(address, timeout=5):
+    """Check if a heartbeat has been received recently.
+
+    The address is the heartbeat ID that the sender posts to.
+    Returns True if a heartbeat was received within HEARTBEAT_STALE_SECONDS.
+    """
+    with heartbeat_lock:
+        last_seen = heartbeat_timestamps.get(address, 0)
+    if last_seen == 0:
+        return False
+    return (time.time() - last_seen) < HEARTBEAT_STALE_SECONDS
+
+
 # ── Per-target monitor ─────────────────────────────────────────────────────
+
+PING_FUNCTIONS = {
+    "icmp": ping_icmp,
+    "tcp": ping_tcp,
+    "dns": ping_dns,
+    "http": ping_http,
+    "heartbeat": ping_heartbeat,
+}
+
 
 def monitor_target(address, name, check_type, stop_event):
     """State machine that monitors a single target and sends alerts."""
-    ping_fn = ping_http if check_type == "http" else ping_icmp
+    ping_fn = PING_FUNCTIONS[check_type]
 
     is_online = True
     consecutive_failures = 0
     last_offline_alert = 0.0
     last_online_alert = 0.0
 
-    logger.info(f"Monitoring {name} ({address}) via {check_type}")
+    # For heartbeat targets, allow time for the first heartbeat to arrive
+    if check_type == "heartbeat":
+        logger.info(
+            f"Monitoring {name} ({address}) via heartbeat "
+            f"(stale after {HEARTBEAT_STALE_SECONDS}s)"
+        )
+        logger.info(
+            f"Waiting {HEARTBEAT_STALE_SECONDS}s for initial heartbeat from {name}"
+        )
+        stop_event.wait(HEARTBEAT_STALE_SECONDS)
+    else:
+        logger.info(f"Monitoring {name} ({address}) via {check_type}")
 
     while not stop_event.is_set():
         success = ping_fn(address)
@@ -212,7 +334,7 @@ def load_targets(csv_path):
             check_type = (
                 row[2].strip().lower() if len(row) > 2 and row[2].strip() else PING_TYPE
             )
-            if check_type not in ("icmp", "http"):
+            if check_type not in PING_FUNCTIONS:
                 logger.warning(
                     f'Invalid check type "{check_type}" for {address}, '
                     f"defaulting to {PING_TYPE}"
@@ -240,6 +362,12 @@ def main():
         sys.exit(1)
 
     logger.info(f"Loaded {len(targets)} target(s)")
+
+    # Start heartbeat server if any targets use heartbeat type
+    has_heartbeat = any(t[2] == "heartbeat" for t in targets)
+    if has_heartbeat:
+        hb_thread = threading.Thread(target=start_heartbeat_server, daemon=True)
+        hb_thread.start()
 
     stop_event = threading.Event()
 

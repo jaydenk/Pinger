@@ -1,0 +1,25 @@
+services:
+  heartbeat:
+    image: alpine:latest
+    container_name: pinger-heartbeat
+    restart: unless-stopped
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        while true; do
+          wget -q -O /dev/null \
+            --header="Authorization: Bearer $${HEARTBEAT_API_KEY}" \
+            --post-data="" \
+            "$${HEARTBEAT_URL}/heartbeat/$${HEARTBEAT_ID}" 2>&1 && \
+            echo "$$(date '+%Y-%m-%d %H:%M:%S') Heartbeat sent" || \
+            echo "$$(date '+%Y-%m-%d %H:%M:%S') Heartbeat failed"
+          sleep $${HEARTBEAT_INTERVAL}
+        done
+    environment:
+      - HEARTBEAT_URL=${HEARTBEAT_URL}
+      - HEARTBEAT_API_KEY=${HEARTBEAT_API_KEY}
+      - HEARTBEAT_ID=${HEARTBEAT_ID:-wan-home}
+      - HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-30}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
