@@ -1,6 +1,6 @@
 services:
   pinger:
-    image: ghcr.io/kerrj/pinger:latest
+    image: ghcr.io/jaydenk/pinger:latest
     container_name: pinger
     restart: unless-stopped
     environment:
