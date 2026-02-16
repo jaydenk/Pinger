@@ -1,0 +1,10 @@
+services:
+  pinger:
+    image: ghcr.io/kerrj/pinger:latest
+    container_name: pinger
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ${CSV_PATH:-./targets.csv}:/app/targets.csv:ro
+      - /etc/localtime:/etc/localtime:ro

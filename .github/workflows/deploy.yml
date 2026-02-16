@@ -1,0 +1,50 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: image
+        run: echo "tag=ghcr.io/${GITHUB_REPOSITORY,,}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.tag }}
+
+      - name: Trigger Portainer redeploy
+        run: |
+          curl_exit=0
+          http_status=$(curl -sS -o /tmp/portainer_webhook_response.txt -w "%{http_code}" -X POST \
+            -H "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
+            -H "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
+            "${{ secrets.PORTAINER_WEBHOOK_URL }}") || curl_exit=$?
+
+          if [[ "$curl_exit" -ne 0 || ! "$http_status" =~ ^2 ]]; then
+            echo "::warning title=Portainer webhook failed::curl_exit=${curl_exit}, http_status=${http_status}. Existing stack kept running."
+            if [[ -s /tmp/portainer_webhook_response.txt ]]; then
+              echo "Webhook response:"
+              cat /tmp/portainer_webhook_response.txt
+            fi
+          else
+            echo "Portainer webhook triggered (HTTP ${http_status})."
+          fi
