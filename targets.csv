@@ -1,5 +1,4 @@
 # address, name, type (type is optional, defaults to PING_TYPE env var)
-# Supported types: icmp, tcp, dns, http, heartbeat
-# TCP format: host:port (defaults to port 443 if omitted)
-# Heartbeat: address is the heartbeat ID that the sender posts to
-wan-home,Home WAN,heartbeat
+# Supported types: icmp, http
+8.8.8.8,Google DNS
+1.1.1.1,Cloudflare DNS
